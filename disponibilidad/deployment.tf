@@ -249,13 +249,13 @@ output "kong_public_ip" {
 # Salida. Muestra las direcciones IP públicas de las instancias de la aplicación.
 output "apps_public_ips" {
   description = "Public IP addresses for the alarms service instances"
-  value       = { for id, instance in aws_instance.app : id => instance.public_ip }
+  value       = { for id, instance in aws_instance.apps : id => instance.public_ip }
 }
 
 # Salida. Muestra las direcciones IP privadas de las instancias de la aplicación.
 output "apps_private_ips" {
   description = "Private IP addresses for the alarms service instances"
-  value       = { for id, instance in aws_instance.app : id => instance.private_ip }
+  value       = { for id, instance in aws_instance.apps : id => instance.private_ip }
 }
 
 # Salida. Muestra la dirección IP privada de la instancia de la base de datos PostgreSQL.

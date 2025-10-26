@@ -204,16 +204,6 @@ resource "aws_instance" "kong" {
                           interval: 5
                           tcp_failures: 1
                 KONG
-
-                sudo chown ubuntu:ubuntu /home/ubuntu/kong.yml
-                sudo chmod 644 /home/ubuntu/kong.yml
-
-                # iniciar Kong / Docker según tu configuración (ajusta si usas otra forma de ejecutar Kong)
-                kong start || true
-
-                sudo docker network create kong-net
-
-                sudo docker run -d --name kong --user root --network=kong-net -v "$(pwd):/kong/declarative/" -e "KONG_DATABASE=off" -e "KONG_DECLARATIVE_CONFIG=/kong/declarative/kong.yml" -e "KONG_PROXY_ACCESS_LOG=/dev/stdout" -e "KONG_ADMIN_ACCESS_LOG=/dev/stdout" -e "KONG_PROXY_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_LISTEN=0.0.0.0:8001" -e "KONG_ADMIN_GUI_URL=http://localhost:8002" -p 8000:8000 -p 8001:8001 -p 8002:8002 kong/kong-gateway:2.7.2.0-alpine
                 EOF
 
     tags = merge(local.common_tags, {
@@ -277,8 +267,6 @@ resource "aws_instance" "apps" {
                 cd SPRINT-2
                 sudo pip3 install --upgrade pip --break-system-packages
                 sudo pip3 install -r requirements.txt --break-system-packages
-                
-                sudo nohup python3 manage.py runserver 0.0.0.0:8080 &
                 EOT
     tags = merge(local.common_tags, {
         Name = "${var.project_prefix}-app-${each.key}"

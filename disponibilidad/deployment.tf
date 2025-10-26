@@ -257,16 +257,18 @@ resource "aws_instance" "apps" {
                 sudo apt-get update -y
                 sudo apt-get install -y python3-pip git build-essential libpq-dev python3-dev
 
-                mkdir -p /labs
-                cd /labs
+                mkdir -p /project
+                cd /project
 
                 if [ ! -d SPRINT-2 ]; then
                     git clone ${local.repository}
                 fi
 
-                cd SPRINT-2
+                cd Sprint-2
                 sudo pip3 install --upgrade pip --break-system-packages
                 sudo pip3 install -r requirements.txt --break-system-packages
+
+                sudo nohup python3 manage.py runserver 0.0.0.0:8080 &
                 EOT
     tags = merge(local.common_tags, {
         Name = "${var.project_prefix}-app-${each.key}"

@@ -1,0 +1,32 @@
+_format_version: "2.1"
+
+services:
+  - host: provesi_upstream
+    name: provesi_service
+    protocol: http
+    routes:
+      - name: provesi_route
+        paths:
+          - /
+        strip_path: false 
+
+upstreams:
+  - name: provesi_upstream
+    targets:
+      - target: <ip-privada-app-a>:8080
+        weight: 100
+      - target: <ip-privada-app-b>:8080
+        weight: 100
+      - target: <ip-privada-app-b>:8080
+        weight: 100
+    healthchecks:
+      threshold: 2
+      active:
+        http_path: /health/
+        timeout: 10
+        healthy:
+          interval: 10
+          successes: 4
+        unhealthy:
+          interval: 5
+          tcp_failures: 1

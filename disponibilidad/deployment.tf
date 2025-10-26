@@ -169,7 +169,47 @@ resource "aws_instance" "kong" {
                 sudo usermod -aG docker $USER
                 newgrp docker
                 
-                kong start
+                # Crear el archivo kong.yml en /home/ubuntu/kong.yml con las IP privadas de las apps
+                cat > /home/ubuntu/kong.yml <<KONG
+                _format_version: "2.1"
+
+                services:
+                  - host: provesi_upstream
+                    name: provesi_service
+                    protocol: http
+                    routes:
+                      - name: provesi_route
+                        paths:
+                          - /
+                        strip_path: false 
+
+                upstreams:
+                  - name: provesi_upstream
+                    targets:
+                      - target: ${aws_instance.apps["a"].private_ip}:8080
+                        weight: 100
+                      - target: ${aws_instance.apps["b"].private_ip}:8080
+                        weight: 100
+                      - target: ${aws_instance.apps["c"].private_ip}:8080
+                        weight: 100
+                    healthchecks:
+                      threshold: 2
+                      active:
+                        http_path: /health/
+                        timeout: 10
+                        healthy:
+                          interval: 10
+                          successes: 4
+                        unhealthy:
+                          interval: 5
+                          tcp_failures: 1
+                KONG
+
+                sudo chown ubuntu:ubuntu /home/ubuntu/kong.yml
+                sudo chmod 644 /home/ubuntu/kong.yml
+
+                # iniciar Kong / Docker según tu configuración (ajusta si usas otra forma de ejecutar Kong)
+                kong start || true
                 EOF
 
     tags = merge(local.common_tags, {
@@ -233,6 +273,8 @@ resource "aws_instance" "apps" {
                 cd SPRINT-2
                 sudo pip3 install --upgrade pip --break-system-packages
                 sudo pip3 install -r requirements.txt --break-system-packages
+                
+                sudo nohup python3 manage.py runserver 0.0.0.0:8080 &
                 EOT
     tags = merge(local.common_tags, {
         Name = "${var.project_prefix}-app-${each.key}"

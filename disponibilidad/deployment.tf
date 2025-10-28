@@ -143,75 +143,6 @@ resource "aws_security_group" "traffic_ssh" {
     })
 }
 
-resource "aws_instance" "kong" {
-    ami = data.aws_ami.ubuntu.id
-    instance_type = var.instance_type
-    associate_public_ip_address = true
-    vpc_security_group_ids = [
-        aws_security_group.traffic_cb.id,
-        aws_security_group.traffic_ssh.id
-    ]
-
-    user_data = <<-EOF
-                #!/bin/bash
-
-                sudo apt-get update
-                sudo apt-get install ca-certificates curl gnupg lsb-release -y
-                sudo mkdir -p /etc/apt/keyrings
-
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-                echo \
-                  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-                
-                sudo apt-get update
-                sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin -y
-                sudo usermod -aG docker $USER
-                newgrp docker
-                
-                # Crear el archivo kong.yml en /home/ubuntu/kong.yml con las IP privadas de las apps
-                cat > /home/ubuntu/kong.yml <<KONG
-                _format_version: "2.1"
-
-                services:
-                  - host: provesi_upstream
-                    name: provesi_service
-                    protocol: http
-                    routes:
-                      - name: provesi_route
-                        paths:
-                          - /
-                        strip_path: false 
-
-                upstreams:
-                  - name: provesi_upstream
-                    targets:
-                      - target: ${aws_instance.apps["a"].private_ip}:8080
-                        weight: 100
-                      - target: ${aws_instance.apps["b"].private_ip}:8080
-                        weight: 100
-                      - target: ${aws_instance.apps["c"].private_ip}:8080
-                        weight: 100
-                    healthchecks:
-                      threshold: 2
-                      active:
-                        http_path: /health/
-                        timeout: 10
-                        healthy:
-                          interval: 10
-                          successes: 4
-                        unhealthy:
-                          interval: 5
-                          tcp_failures: 1
-                KONG
-                EOF
-
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-kong"
-        Role = "circuit-breaker"
-    })
-}
-
 resource "aws_instance" "database" {
     ami = data.aws_ami.ubuntu.id
     instance_type = var.instance_type
@@ -273,6 +204,79 @@ resource "aws_instance" "apps" {
     tags = merge(local.common_tags, {
         Name = "${var.project_prefix}-app-${each.key}"
         Role = "application-server"
+    })
+}
+
+resource "aws_instance" "kong" {
+    ami = data.aws_ami.ubuntu.id
+    instance_type = var.instance_type
+    associate_public_ip_address = true
+    vpc_security_group_ids = [
+        aws_security_group.traffic_cb.id,
+        aws_security_group.traffic_ssh.id
+    ]
+
+    user_data = <<-EOF
+                #!/bin/bash
+
+                sudo apt-get update
+                sudo apt-get install ca-certificates curl gnupg lsb-release -y
+                sudo mkdir -p /etc/apt/keyrings
+
+                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+                echo \
+                  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+                  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                
+                sudo apt-get update
+                sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin -y
+                sudo usermod -aG docker $USER
+                newgrp docker
+                
+                # Crear el archivo kong.yml en /home/ubuntu/kong.yml con las IP privadas de las apps
+                cat > /home/ubuntu/kong.yml <<KONG
+                _format_version: "2.1"
+
+                services:
+                  - host: provesi_upstream
+                    name: provesi_service
+                    protocol: http
+                    routes:
+                      - name: provesi_route
+                        paths:
+                          - /
+                        strip_path: false 
+
+                upstreams:
+                  - name: provesi_upstream
+                    targets:
+                      - target: ${aws_instance.apps["a"].private_ip}:8080
+                        weight: 100
+                      - target: ${aws_instance.apps["b"].private_ip}:8080
+                        weight: 100
+                      - target: ${aws_instance.apps["c"].private_ip}:8080
+                        weight: 100
+                    healthchecks:
+                      threshold: 2
+                      active:
+                        http_path: /health/
+                        timeout: 10
+                        healthy:
+                          interval: 10
+                          successes: 4
+                        unhealthy:
+                          interval: 5
+                          tcp_failures: 1
+                KONG
+
+                sudo docker network create kong-net
+
+                sudo docker run -d --name kong --user root --network=kong-net -v "$(pwd):/kong/declarative/" -e "KONG_DATABASE=off" -e "KONG_DECLARATIVE_CONFIG=/kong/declarative/kong.yml" -e "KONG_PROXY_ACCESS_LOG=/dev/stdout" -e "KONG_ADMIN_ACCESS_LOG=/dev/stdout" -e "KONG_PROXY_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_LISTEN=0.0.0.0:8001" -e "KONG_ADMIN_GUI_URL=http://localhost:8002" -p 8000:8000 -p 8001:8001 -p 8002:8002 kong/kong-gateway:2.7.2.0-alpine
+                EOF
+
+    tags = merge(local.common_tags, {
+        Name = "${var.project_prefix}-kong"
+        Role = "circuit-breaker"
     })
 }
 

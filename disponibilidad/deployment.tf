@@ -268,9 +268,10 @@ resource "aws_instance" "kong" {
                           interval: 5
                           tcp_failures: 1
                 KONG
-
-                sudo docker network create kong-net
                 EOF
+    #para correr:
+    #sudo docker network create kong-net
+    #sudo docker run -d --name kong --user root --network=kong-net -v "$(pwd):/kong/declarative/" -e "KONG_DATABASE=off" -e "KONG_DECLARATIVE_CONFIG=/kong/declarative/kong.yml" -e "KONG_PROXY_ACCESS_LOG=/dev/stdout" -e "KONG_ADMIN_ACCESS_LOG=/dev/stdout" -e "KONG_PROXY_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_LISTEN=0.0.0.0:8001" -e "KONG_ADMIN_GUI_URL=http://localhost:8002" -p 8000:8000 -p 8001:8001 -p 8002:8002 kong/kong-gateway:2.7.2.0-alpine
 
     tags = merge(local.common_tags, {
         Name = "${var.project_prefix}-kong"

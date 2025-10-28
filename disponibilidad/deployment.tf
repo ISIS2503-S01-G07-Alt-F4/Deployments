@@ -199,8 +199,12 @@ resource "aws_instance" "apps" {
                 sudo pip3 install --upgrade pip --break-system-packages
                 pip3 install -r requirements.txt --break-system-packages
 
-                sudo nohup python3 manage.py runserver 0.0.0.0:8080 &
+                python3 manage.py runserver 0.0.0.0:8080
                 EOT
+
+    #Si el run no funciona
+    #cd /project/Sprint-2
+    #python3 manage.py runserver 0.0.0.0:8080
     tags = merge(local.common_tags, {
         Name = "${var.project_prefix}-app-${each.key}"
         Role = "application-server"

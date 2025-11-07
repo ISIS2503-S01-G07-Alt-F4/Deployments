@@ -339,3 +339,119 @@ output "database_private_ip" {
   description = "Private IP for the PostgreSQL database"
   value       = aws_instance.database.private_ip
 }    
+
+#################################################################
+
+# Grupo de seguridad para monitoreo
+resource "aws_security_group" "traffic_monitoring" {
+name = "${var.project_prefix}-traffic-monitoring"
+description = "Allow incoming traffic to monitoring instance (SSH + HTTP(9090))"
+
+
+ingress {
+description = "SSH from anywhere (adjust in prod)"
+from_port = 22
+to_port = 22
+protocol = "tcp"
+cidr_blocks = ["0.0.0.0/0"]
+}
+
+
+ingress {
+description = "Monitoring HTTP (port 9090)"
+from_port = 9090
+to_port = 9090
+protocol = "tcp"
+cidr_blocks = ["0.0.0.0/0"]
+}
+
+
+egress {
+description = "Allow all outbound traffic"
+from_port = 0
+to_port = 0
+protocol = "-1"
+cidr_blocks = ["0.0.0.0/0"]
+}
+
+
+tags = merge(local.common_tags, { Name = "${var.project_prefix}-traffic-monitoring" })
+}
+
+
+# Instancia de monitoreo
+resource "aws_instance" "monitoring" {
+ami = data.aws_ami.ubuntu.id
+instance_type = var.instance_type
+associate_public_ip_address = true
+vpc_security_group_ids = [aws_security_group.traffic_ssh.id, aws_security_group.traffic_monitoring.id]
+
+
+user_data = <<-EOT
+#!/bin/bash
+set -e
+apt-get update -y
+apt-get install -y python3-pip git build-essential python3-dev || true
+
+
+# Directorio del proyecto
+mkdir -p /project && cd /project
+
+
+# Clonar el repositorio principal (se reusa la variable local.repository usada por las apps)
+git clone ${local.repository} || true
+
+
+# Intentar entrar a la carpeta Sprint-2 si existe (mismo layout que las apps)
+if [ -d "Sprint-2" ]; then
+cd Sprint-2
+else
+# si el repositorio tiene otro layout, intentar ejecutar en la raíz
+cd $(ls -1 | head -n 1) || true
+fi
+
+
+# Instalar dependencias si hay requirements.txt
+if [ -f requirements.txt ]; then
+pip3 install --upgrade pip --break-system-packages || true
+pip3 install -r requirements.txt --break-system-packages || true
+fi
+
+
+# Crear servicio systemd para ejecutar monitor.py si existe
+if [ -f monitor.py ]; then
+cat > /etc/systemd/system/monitoring.service <<SERVICE
+[Unit]
+Description=Monitoring Service for project
+After=network.target
+
+
+[Service]
+Type=simple
+WorkingDirectory=/project/Sprint-2
+ExecStart=/usr/bin/python3 /project/Sprint-2/monitor.py
+Restart=on-failure
+
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+
+systemctl daemon-reload
+systemctl enable monitoring.service
+systemctl start monitoring.service
+else
+# Si no hay monitor.py, intentar levantar una app simple en 9090 si manage.py existe
+if [ -f manage.py ]; then
+nohup python3 manage.py runserver 0.0.0.0:9090 &>/var/log/monitoring.log &
+fi
+fi
+EOT
+
+
+tags = merge(local.common_tags, { Name = "${var.project_prefix}-monitoring", Role = "monitoring" })
+}
+
+
+}

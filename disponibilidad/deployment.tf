@@ -16,293 +16,326 @@
 # ******************************************************************
 
 
-# Variable. Define la región de AWS donde se desplegará la infraestructura.
 variable "region" {
-    description = "AWS region for deployment"
-    type        = string
-    default     = "us-east-1"
+  description = "AWS region for deployment"
+  type        = string
+  default     = "us-east-1"
 }
 
 variable "project_prefix" {
-    description = "Prefix used for naming AWS resources"
-    type        = string
-    default     = "disp"
+  description = "Prefix used for naming AWS resources"
+  type        = string
+  default     = "disp"
 }
 
-# Variable. Define el tipo de instancia EC2 a usar para las máquinas virtuales.
 variable "instance_type" {
-    description = "EC2 instance type for application hosts"
-    type        = string
-    default     = "t2.nano"
+  description = "EC2 instance type for application hosts"
+  type        = string
+  default     = "t2.nano"
 }
 
-# Proveedor. Define el proveedor de infraestructura (AWS) y la región.
 provider "aws" {
-    region = var.region
+  region = var.region
 }
 
 locals {
-    project_name = "disponibilidad-provesi"
-    repository = "https://github.com/ISIS2503-S01-G07-Alt-F4/Sprint-2.git"
+  project_name  = "disponibilidad-provesi"
+  repository    = "https://github.com/ISIS2503-S01-G07-Alt-F4/Sprint-2.git"
+  alert_email   = "js.avilan@uniandes.edu.co" # ← correo donde llegan las notificaciones
 
-    common_tags = {
-        Project = local.project_name
-        ManagedBy = "Terraform"
-    }
+  common_tags = {
+    Project   = local.project_name
+    ManagedBy = "Terraform"
+  }
 }
 
-# Data Source. Busca la AMI más reciente de Ubuntu 24.04 usando los filtros especificados.
+# AMI Ubuntu 24.04
 data "aws_ami" "ubuntu" {
-    most_recent = true
-    owners      = ["099720109477"]
+  most_recent = true
+  owners      = ["099720109477"]
 
-    filter {
-        name   = "name"
-        values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
-    }
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+  }
 
-    filter {
-        name   = "virtualization-type"
-        values = ["hvm"]
-    }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
 }
 
+# VPC por defecto (para restringir el puerto 8001)
+data "aws_vpc" "default" {
+  default = true
+}
+
+###############################################################################
+# Security Groups
+###############################################################################
+
+# Tráfico de apps — solo desde Kong
 resource "aws_security_group" "traffic_django" {
-    name        = "${var.project_prefix}-traffic-django"
-    description = "Allow traffic on port 8080"
+  name        = "${var.project_prefix}-traffic-django"
+  description = "Allow traffic to app instances only from Kong (traffic-cb)."
 
-    ingress {
-        from_port   = 8080
-        to_port     = 8080
-        protocol    = "tcp"
-        cidr_blocks = ["0.0.0.0/0"]
-    }
+  ingress {
+    description     = "App port from Kong"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.traffic_cb.id]
+  }
 
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-traffic-services"
-    })
+  egress {
+    description = "Allow all outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-traffic-django" })
 }
 
+# Kong (circuit breaker / load balancer)
 resource "aws_security_group" "traffic_cb" {
-    name        = "${var.project_prefix}-traffic-cb"
-    description = "Expose Kong circuit breaker ports"
+  name        = "${var.project_prefix}-traffic-cb"
+  description = "Expose Kong circuit breaker ports"
 
-    ingress {
-        description = "Kong traffic"
-        from_port   = 8000
-        to_port     = 8001
-        protocol    = "tcp"
-        cidr_blocks = ["0.0.0.0/0"]
-    }
+  # Proxy público
+  ingress {
+    description = "Kong proxy (public)"
+    from_port   = 8000
+    to_port     = 8000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-traffic-cb"
-    })
+  # Admin interno
+  ingress {
+    description = "Kong admin (internal only)"
+    from_port   = 8001
+    to_port     = 8001
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-traffic-cb" })
 }
 
+# PostgreSQL solo accesible desde apps
 resource "aws_security_group" "traffic_db" {
-    name        = "${var.project_prefix}-traffic-db"
-    description = "Allow PostgreSQL access"
+  name        = "${var.project_prefix}-traffic-db"
+  description = "Allow PostgreSQL access from app servers"
 
-    ingress {
-        description = "Traffic from anywhere to DB"
-        from_port   = 5432
-        to_port     = 5432
-        protocol    = "tcp"
-        cidr_blocks = ["0.0.0.0/0"]
-    }
+  ingress {
+    description     = "Postgres from app servers"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.traffic_django.id]
+  }
 
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-traffic-db"
-    })
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-traffic-db" })
 }
 
-# Recurso. Define el grupo de seguridad para el tráfico SSH (22) y permite todo el tráfico saliente.
+# SSH (restringir IPs en producción)
 resource "aws_security_group" "traffic_ssh" {
-    name        = "${var.project_prefix}-traffic-ssh"
-    description = "Allow SSH access"
+  name        = "${var.project_prefix}-traffic-ssh"
+  description = "Allow SSH access"
 
-    ingress {
-        description = "SSH access from anywhere"
-        from_port   = 22
-        to_port     = 22
-        protocol    = "tcp"
-        cidr_blocks = ["0.0.0.0/0"]
-    }
+  ingress {
+    description = "SSH from anywhere (adjust in prod)"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-    egress {
-        description = "Allow all outbound traffic"
-        from_port   = 0
-        to_port     = 0
-        protocol    = "-1"
-        cidr_blocks = ["0.0.0.0/0"]
-    }
+  egress {
+    description = "Allow all outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-traffic-ssh"
-    })
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-traffic-ssh" })
 }
 
+###############################################################################
+# Instancias
+###############################################################################
+
+# Base de datos
 resource "aws_instance" "database" {
-    ami = data.aws_ami.ubuntu.id
-    instance_type = var.instance_type
-    associate_public_ip_address = true
-    vpc_security_group_ids = [aws_security_group.traffic_db.id, aws_security_group.traffic_ssh.id]
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  associate_public_ip_address = true
+  vpc_security_group_ids      = [aws_security_group.traffic_db.id, aws_security_group.traffic_ssh.id]
 
-    user_data = <<-EOT
-                #!/bin/bash
+  user_data = <<-EOT
+              #!/bin/bash
+              apt-get update -y
+              apt-get install -y postgresql postgresql-contrib
+              sudo -u postgres psql -c "CREATE USER provesi_user WITH PASSWORD 'Alt-f4';"
+              sudo -u postgres createdb -O provesi_user provesi_db
+              echo "host all all 0.0.0.0/0 trust" | tee -a /etc/postgresql/16/main/pg_hba.conf
+              echo "listen_addresses='*'" | tee -a /etc/postgresql/16/main/postgresql.conf
+              echo "max_connections=2000" | tee -a /etc/postgresql/16/main/postgresql.conf
+              service postgresql restart
+              EOT
 
-                sudo apt-get update -y
-                sudo apt-get install -y postgresql postgresql-contrib
-
-                sudo -u postgres psql -c "CREATE USER provesi_user WITH PASSWORD 'Alt-f4';"
-                sudo -u postgres createdb -O provesi_user provesi_db
-                echo "host all all 0.0.0.0/0 trust" | sudo tee -a /etc/postgresql/16/main/pg_hba.conf
-                echo "listen_addresses='*'" | sudo tee -a /etc/postgresql/16/main/postgresql.conf
-                echo "max_connections=2000" | sudo tee -a /etc/postgresql/16/main/postgresql.conf
-                sudo service postgresql restart
-                EOT
-
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-db"
-        Role = "database"
-    })
+  tags = merge(local.common_tags, { Name = "${var.project_prefix}-db", Role = "database" })
 }
 
+# Apps
 resource "aws_instance" "apps" {
-    for_each = toset(["a", "b", "c"])
+  for_each = toset(["a", "b", "c"])
 
-    ami = data.aws_ami.ubuntu.id
-    instance_type = var.instance_type
-    associate_public_ip_address = true
-    vpc_security_group_ids = [
-        aws_security_group.traffic_django.id,
-        aws_security_group.traffic_ssh.id
-    ]
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  associate_public_ip_address = true
+  vpc_security_group_ids      = [aws_security_group.traffic_django.id, aws_security_group.traffic_ssh.id]
 
-    user_data = <<-EOT
-                #!/bin/bash
-                sudo export DATABASE_HOST=${aws_instance.database.private_ip}
-                echo "DATABASE_HOST=${aws_instance.database.private_ip}" | sudo tee -a /etc/environment
+  user_data = <<-EOT
+              #!/bin/bash
+              export DATABASE_HOST=${aws_instance.database.private_ip}
+              echo "DATABASE_HOST=${aws_instance.database.private_ip}" | tee -a /etc/environment
 
-                sudo apt-get update -y
-                sudo apt-get install -y python3-pip git build-essential libpq-dev python3-dev
+              apt-get update -y
+              apt-get install -y python3-pip git build-essential libpq-dev python3-dev
 
-                mkdir -p /project
-                cd /project
+              mkdir -p /project && cd /project
+              git clone ${local.repository} || true
+              cd Sprint-2
+              pip3 install --upgrade pip --break-system-packages
+              pip3 install -r requirements.txt --break-system-packages
 
-                if [ ! -d SPRINT-2 ]; then
-                    git clone ${local.repository}
-                fi
+              export ALERT_EMAIL="${local.alert_email}"
+              echo "ALERT_EMAIL=${local.alert_email}" | tee -a /etc/environment
 
-                cd Sprint-2
-                sudo pip3 install --upgrade pip --break-system-packages
-                pip3 install -r requirements.txt --break-system-packages
+              python3 manage.py runserver 0.0.0.0:8080
+              EOT
 
-                python3 manage.py runserver 0.0.0.0:8080
-                EOT
-
-    #Si el run no funciona
-    #cd /project/Sprint-2
-    #python3 manage.py runserver 0.0.0.0:8080
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-app-${each.key}"
-        Role = "application-server"
-    })
+  tags = merge(local.common_tags, {
+    Name = "${var.project_prefix}-app-${each.key}",
+    Role = "application-server"
+  })
 }
 
+# Kong (circuit breaker / load balancer)
 resource "aws_instance" "kong" {
-    ami = data.aws_ami.ubuntu.id
-    instance_type = var.instance_type
-    associate_public_ip_address = true
-    vpc_security_group_ids = [
-        aws_security_group.traffic_cb.id,
-        aws_security_group.traffic_ssh.id
-    ]
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  associate_public_ip_address = true
+  vpc_security_group_ids      = [aws_security_group.traffic_cb.id, aws_security_group.traffic_ssh.id]
 
-    user_data = <<-EOF
-                #!/bin/bash
+  user_data = <<-EOF
+              #!/bin/bash
+              apt-get update -y
+              apt-get install -y ca-certificates curl gnupg lsb-release docker-ce docker-ce-cli containerd.io docker-compose-plugin python3 python3-pip git
 
-                sudo apt-get update
-                sudo apt-get install ca-certificates curl gnupg lsb-release -y
-                sudo mkdir -p /etc/apt/keyrings
+              # Crear kong.yml con IPs privadas
+              cat > /home/ubuntu/kong.yml <<KONG
+              _format_version: "2.1"
+              services:
+                - host: provesi_upstream
+                  name: provesi_service
+                  protocol: http
+                  routes:
+                    - name: provesi_route
+                      paths: ["/"]
+                      strip_path: false
+              upstreams:
+                - name: provesi_upstream
+                  targets:
+                    - target: ${aws_instance.apps["a"].private_ip}:8080
+                      weight: 100
+                    - target: ${aws_instance.apps["b"].private_ip}:8080
+                      weight: 100
+                    - target: ${aws_instance.apps["c"].private_ip}:8080
+                      weight: 100
+                  healthchecks:
+                    threshold: 2
+                    active:
+                      http_path: /health/
+                      timeout: 10
+                      healthy:
+                        interval: 10
+                        successes: 4
+                      unhealthy:
+                        interval: 5
+                        tcp_failures: 1
+              KONG
 
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-                echo \
-                  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-                
-                sudo apt-get update
-                sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin -y
-                sudo usermod -aG docker $USER
-                newgrp docker
-                
-                # Crear el archivo kong.yml en /home/ubuntu/kong.yml con las IP privadas de las apps
-                cat > /home/ubuntu/kong.yml <<KONG
-                _format_version: "2.1"
+              # Instalar monitor_kong
+              cd /home/ubuntu
+              git clone ${local.repository} || true
+              cd Sprint-2
+              pip3 install -r requirements.txt --break-system-packages
 
-                services:
-                  - host: provesi_upstream
-                    name: provesi_service
-                    protocol: http
-                    routes:
-                      - name: provesi_route
-                        paths:
-                          - /
-                        strip_path: false 
+              export ALERT_EMAIL="${local.alert_email}"
+              echo "ALERT_EMAIL=${local.alert_email}" | tee -a /etc/environment
 
-                upstreams:
-                  - name: provesi_upstream
-                    targets:
-                      - target: ${aws_instance.apps["a"].private_ip}:8080
-                        weight: 100
-                      - target: ${aws_instance.apps["b"].private_ip}:8080
-                        weight: 100
-                      - target: ${aws_instance.apps["c"].private_ip}:8080
-                        weight: 100
-                    healthchecks:
-                      threshold: 2
-                      active:
-                        http_path: /health/
-                        timeout: 10
-                        healthy:
-                          interval: 10
-                          successes: 4
-                        unhealthy:
-                          interval: 5
-                          tcp_failures: 1
-                KONG
-                EOF
-    #para correr:
-    #sudo docker network create kong-net
-    #sudo docker run -d --name kong --user root --network=kong-net -v "$(pwd):/kong/declarative/" -e "KONG_DATABASE=off" -e "KONG_DECLARATIVE_CONFIG=/kong/declarative/kong.yml" -e "KONG_PROXY_ACCESS_LOG=/dev/stdout" -e "KONG_ADMIN_ACCESS_LOG=/dev/stdout" -e "KONG_PROXY_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_ERROR_LOG=/dev/stderr" -e "KONG_ADMIN_LISTEN=0.0.0.0:8001" -e "KONG_ADMIN_GUI_URL=http://localhost:8002" -p 8000:8000 -p 8001:8001 -p 8002:8002 kong/kong-gateway:2.7.2.0-alpine
+              cat > /home/ubuntu/run_monitor.sh <<'RUNMON'
+              #!/bin/bash
+              cd /home/ubuntu/Sprint-2
+              export KONG_ADMIN_URL="http://127.0.0.1:8001"
+              export KONG_UPSTREAM="provesi_upstream"
+              export ALERT_EMAIL="${local.alert_email}"
+              python3 manage.py monitor_kong --kong-admin "$KONG_ADMIN_URL" --upstream "$KONG_UPSTREAM" --interval 30 --email "$ALERT_EMAIL"
+              RUNMON
+              chmod +x /home/ubuntu/run_monitor.sh
 
-    tags = merge(local.common_tags, {
-        Name = "${var.project_prefix}-kong"
-        Role = "circuit-breaker"
-    })
+              cat > /etc/systemd/system/monitor-kong.service <<'SERVICE'
+              [Unit]
+              Description=Kong upstream monitor (Django management command)
+              After=network.target
+
+              [Service]
+              Type=simple
+              User=ubuntu
+              ExecStart=/home/ubuntu/run_monitor.sh
+              Restart=always
+              RestartSec=10
+              Environment=PYTHONUNBUFFERED=1
+
+              [Install]
+              WantedBy=multi-user.target
+              SERVICE
+
+              systemctl daemon-reload
+              systemctl enable --now monitor-kong.service
+              EOF
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_prefix}-kong",
+    Role = "circuit-breaker"
+  })
 }
 
-# Salida. Muestra la dirección IP pública de la instancia de Kong (Circuit Breaker).
+###############################################################################
+# Outputs
+###############################################################################
+
 output "kong_public_ip" {
-  description = "Public IP address for the Kong circuit breaker instance"
+  description = "Public IP for Kong (load balancer)"
   value       = aws_instance.kong.public_ip
 }
 
-# Salida. Muestra las direcciones IP públicas de las instancias de la aplicación.
 output "apps_public_ips" {
-  description = "Public IP addresses for the alarms service instances"
-  value       = { for id, instance in aws_instance.apps : id => instance.public_ip }
+  description = "Public IPs for Django app instances"
+  value       = { for id, inst in aws_instance.apps : id => inst.public_ip }
 }
 
-# Salida. Muestra las direcciones IP privadas de las instancias de la aplicación.
 output "apps_private_ips" {
-  description = "Private IP addresses for the alarms service instances"
-  value       = { for id, instance in aws_instance.apps : id => instance.private_ip }
+  description = "Private IPs for Django app instances"
+  value       = { for id, inst in aws_instance.apps : id => inst.private_ip }
 }
 
-# Salida. Muestra la dirección IP privada de la instancia de la base de datos PostgreSQL.
 output "database_private_ip" {
-  description = "Private IP address for the PostgreSQL database instance"
+  description = "Private IP for the PostgreSQL database"
   value       = aws_instance.database.private_ip
-}
+}    
